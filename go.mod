@@ -13,7 +13,7 @@ require (
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/robbiet480/go-wordpress v0.0.0-20180206201500-3b8369ffcef3 // indirect
 	github.com/tomnomnom/linkheader v0.0.0-20180905144013-02ca5825eb80 // indirect
-	golang.org/x/net v0.21.0 // indirect
+	golang.org/x/net v0.23.0 // indirect
 )
 
 require (
