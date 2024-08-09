@@ -1,0 +1,18 @@
+{
+  "databaseID": "9b8803d",
+
+  "propertyDescription": "Description",
+  "propertyTags": "Tags",
+  "propertyCategories": "Category",
+
+  "filterProp": "Status",
+  "filterValue": [
+    "Finished ✅"
+  ],
+
+  "wordPressConfig": {
+    "username": "i",
+    "password": "Qbae bo93 z8iG 8jRr TzpR Q0Ta",
+    "siteURL": "https://rxrw.me/"
+  }
+}
