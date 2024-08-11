@@ -5,9 +5,9 @@
   "propertyTags": "Tags",
   "propertyCategories": "Category",
 
-  "filterProp": "Status",
+  "filterProp": "Platform",
   "filterValue": [
-    "Finished ✅"
+    "WordPress"
   ],
 
   "wordPressConfig": {

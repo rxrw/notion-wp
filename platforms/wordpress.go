@@ -3,12 +3,10 @@ package platforms
 import (
 	"context"
 	"fmt"
-	"github.com/qorpress/go-wordpress"
+	"github.com/jomei/notionapi"
+	"github.com/rxrw/go-wordpress"
 	"github.com/rxrw/notion-wp/utils"
 	"strings"
-	"time"
-
-	"github.com/jomei/notionapi"
 )
 
 var wordpressUtil *WordPressUtil
@@ -21,37 +19,43 @@ type WordPressUtil struct {
 	cachedTags       []*wordpress.Tag
 }
 
-func (w *WordPressUtil) UpdateOrCreatePost(title string, content []byte, createdAt time.Time, categories []string, tags []string, bannerImageUrl string, status string, wordpressID int, lastUpdatedAt time.Time) int {
+func (w *WordPressUtil) CheckIfShouldProcess(notionPage notionapi.Page) bool {
+	wordpressID := int(notionPage.Properties["WordPress ID"].(*notionapi.NumberProperty).Number)
+	existingPost, _, _ := w.wordpressApi.Posts.Get(context.Background(), wordpressID, nil)
+	if existingPost.Modified.Equal(notionPage.LastEditedTime) || existingPost.Modified.After(notionPage.LastEditedTime) {
+		fmt.Printf("Post %s is already latest in WordPress, skipping\n", notionPage.Properties["Name"].(*notionapi.TitleProperty).Title[0].PlainText)
+		return false
+	}
+	return true
+}
+
+func (w *WordPressUtil) UpdateOrCreatePost(notionPage notionapi.Page, title string, content string, categories []string, tags []string, bannerImageUrl string, status string, wordpressID int) int {
 	var err error
 	var post *wordpress.Post
 	post = &wordpress.Post{
 		Title:      wordpress.RenderedString{Raw: title},
-		Content:    wordpress.RenderedString{Raw: string(content)},
+		Content:    wordpress.RenderedString{Raw: content},
 		Categories: w.GetCategoryIds(categories),
 		Tags:       w.GetTagIds(tags),
 		Status:     w.processWordpressStatus(status),
+		Date:       wordpress.Time{Time: notionPage.CreatedTime},
+	}
+
+	if bannerImageUrl != "" {
+		mediaData, contentType, filename, _ := utils.GetMedia(bannerImageUrl)
+		media := w.UploadMedia(filename, mediaData, contentType)
+		post.FeaturedMedia = media.ID
 	}
 
 	if wordpressID > 0 {
-		existingPost, _, _ := w.wordpressApi.Posts.Get(context.Background(), wordpressID, nil)
-		if existingPost.Modified.Time.After(lastUpdatedAt) {
-			fmt.Printf("Post %s is already updated in WordPress, skipping\n", title)
-			return wordpressID
-		}
-
 		fmt.Printf("Updating post %s in WordPress\n", title)
-		post.ID = 0
+		post.ID = wordpressID
 		post, _, err = w.wordpressApi.Posts.Update(context.Background(), wordpressID, post)
 	} else {
-		if bannerImageUrl != "" {
-			mediaData, contentType, filename, _ := utils.GetMedia(bannerImageUrl)
-			media := w.UploadMedia(filename, mediaData, contentType)
-			post.FeaturedMedia = media.ID
-		}
-		post.Date = wordpress.Time{Time: createdAt}
-		fmt.Printf("Creating post %s in WordPress\n", title)
+		post.Date = wordpress.Time{Time: notionPage.CreatedTime}
+		fmt.Printf("Creating post %s , %s in WordPress\n", title, notionPage.CreatedTime)
 		post, _, err = w.wordpressApi.Posts.Create(context.Background(), post)
-		w.updateNotionPageWordPressID(notionapi.Page{}, post.ID, "")
+		w.updateNotionPageWordPressID(notionPage, post.ID)
 	}
 	if err != nil {
 		fmt.Println(err)
@@ -128,17 +132,10 @@ func (w *WordPressUtil) GetTagIds(tags []string) []int {
 	return tagIds
 }
 
-func (w *WordPressUtil) updateNotionPageWordPressID(p notionapi.Page, wordpressID int, wordpressUniqueKey string) bool {
+func (w *WordPressUtil) updateNotionPageWordPressID(p notionapi.Page, wordpressID int) bool {
 	updatedProps := make(notionapi.Properties)
 	updatedProps["WordPress ID"] = notionapi.NumberProperty{
 		Number: float64(wordpressID),
-	}
-	updatedProps["WordPress Unique Key"] = notionapi.TextProperty{
-		Text: []notionapi.RichText{
-			{
-				PlainText: wordpressUniqueKey,
-			},
-		},
 	}
 
 	_, err := w.notionClient.Page.Update(context.Background(), notionapi.PageID(p.ID),
@@ -150,13 +147,13 @@ func (w *WordPressUtil) updateNotionPageWordPressID(p notionapi.Page, wordpressI
 }
 
 func (w *WordPressUtil) processWordpressStatus(statusText string) string {
-	if strings.Contains(statusText, "draft") || strings.Contains(statusText, "In Progress") {
+	if strings.Contains(statusText, "Draft") || strings.Contains(statusText, "In progress") {
 		return wordpress.PostStatusDraft
 	}
 	if strings.Contains(statusText, "Published") {
 		return wordpress.PostStatusPublish
 	}
-	return wordpress.PostStatusPending
+	return wordpress.PostStatusDraft
 }
 
 func NewWordpressUtil(username string, password string, siteUrl string, notionClient *notionapi.Client) (*WordPressUtil, error) {

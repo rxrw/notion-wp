@@ -1,6 +1,5 @@
 package pkg
 
-// Client represents the WordPress API client
 type WordPressClient struct {
 	Username string
 	Password string

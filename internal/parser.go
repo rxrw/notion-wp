@@ -3,9 +3,6 @@ package internal
 import (
 	"context"
 	"fmt"
-	"github.com/gomarkdown/markdown"
-	"github.com/gomarkdown/markdown/html"
-	"github.com/gomarkdown/markdown/parser"
 	"github.com/rxrw/notion-wp/pkg"
 	"github.com/rxrw/notion-wp/platforms"
 	"log"
@@ -15,39 +12,53 @@ import (
 	"github.com/jomei/notionapi"
 )
 
-// func filterFromConfig(config notion_blog.BlogConfig) *notionapi.OrCompoundFilter {
-// 	if config.FilterProp == "" || len(config.FilterValue) == 0 {
-// 		return nil
-// 	}
-
-// 	properties := make(notionapi.OrCompoundFilter, len(config.FilterValue))
-
-// 	for i, val := range config.FilterValue {
-// 		properties[i] = notionapi.PropertyFilter{
-// 			Property: config.FilterProp,
-// 			Select: &notionapi.SelectFilterCondition{
-// 				Equals: val,
-// 			},
-// 		}
-// 	}
-
-// 	return &properties
-// }
-
-func recursiveGetChildren(client *notionapi.Client, blockID notionapi.BlockID) (blocks []notionapi.Block, err error) {
-	res, err := client.Block.GetChildren(context.Background(), blockID, &notionapi.Pagination{
-		PageSize: 100,
-	})
-	if err != nil {
-		return nil, err
+func filterFromConfig(config pkg.BlogConfig) *notionapi.OrCompoundFilter {
+	if config.FilterProp == "" || len(config.FilterValue) == 0 {
+		return nil
 	}
 
-	blocks = res.Results
-	if len(blocks) == 0 {
-		return
+	properties := make(notionapi.OrCompoundFilter, len(config.FilterValue))
+
+	for i, val := range config.FilterValue {
+		properties[i] = notionapi.PropertyFilter{
+			Property: config.FilterProp,
+			MultiSelect: &notionapi.MultiSelectFilterCondition{
+				Contains: val,
+			},
+		}
 	}
 
-	for _, block := range blocks {
+	return &properties
+}
+
+func recursiveGetChildren(client *notionapi.Client, blockID notionapi.BlockID) ([]notionapi.Block, error) {
+	var allBlocks []notionapi.Block
+	var startCursor notionapi.Cursor
+
+	for {
+		// 获取当前页的块
+		res, err := client.Block.GetChildren(context.Background(), blockID, &notionapi.Pagination{
+			PageSize:    100,
+			StartCursor: startCursor, // 设置分页的起始光标
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		// 将获取的块添加到全部块的列表中
+		allBlocks = append(allBlocks, res.Results...)
+
+		// 如果没有更多的块，则退出循环
+		if res.HasMore {
+			startCursor = notionapi.Cursor(res.NextCursor) // 更新光标为下一页的起点
+		} else {
+			break
+		}
+	}
+
+	// 递归获取每个块的子块
+	for _, block := range allBlocks {
+		var err error
 		switch b := block.(type) {
 		case *notionapi.ParagraphBlock:
 			b.Paragraph.Children, err = recursiveGetChildren(client, b.ID)
@@ -64,11 +75,11 @@ func recursiveGetChildren(client *notionapi.Client, blockID notionapi.BlockID) (
 		}
 
 		if err != nil {
-			return
+			return nil, err
 		}
 	}
 
-	return
+	return allBlocks, nil
 }
 
 func ParseAndGenerate(config pkg.BlogConfig) error {
@@ -76,19 +87,45 @@ func ParseAndGenerate(config pkg.BlogConfig) error {
 
 	wordpressClient, _ := platforms.NewWordpressUtil(config.WordPressConfig.Username, config.WordPressConfig.Password, config.WordPressConfig.SiteURL, client)
 
-	spin := spinner.StartNew("Querying Notion database")
-	q, err := client.Database.Query(context.Background(), notionapi.DatabaseID(config.DatabaseID),
-		&notionapi.DatabaseQueryRequest{
-			// Filter:   filterFromConfig(config),
-			PageSize: 100,
-		})
-	spin.Stop()
-	if err != nil {
-		return fmt.Errorf("❌ Querying Notion database: %s", err)
-	}
-	fmt.Println("✔ Querying Notion database: Completed")
+	var allResults []notionapi.Page
+	var startCursor notionapi.Cursor
 
-	for i, res := range q.Results {
+	for {
+		spin := spinner.StartNew("Querying Notion database")
+		q, err := client.Database.Query(context.Background(), notionapi.DatabaseID(config.DatabaseID),
+			&notionapi.DatabaseQueryRequest{
+				Filter:      filterFromConfig(config),
+				PageSize:    100,
+				StartCursor: startCursor, // 分页的起始光标
+				Sorts: []notionapi.SortObject{
+					{
+						Property:  "Created",
+						Timestamp: "created_time",
+						Direction: "ascending",
+					},
+				},
+			})
+		spin.Stop()
+		if err != nil {
+			return fmt.Errorf("❌ Querying Notion database: %s", err)
+		}
+		fmt.Println("✔ Querying Notion database: Completed")
+
+		// 将当前页的结果添加到总结果中
+		allResults = append(allResults, q.Results...)
+
+		// 如果有更多的结果，则更新光标继续请求
+		if q.HasMore {
+			startCursor = q.NextCursor
+		} else {
+			break
+		}
+	}
+
+	for i, res := range allResults {
+		if !wordpressClient.CheckIfShouldProcess(res) {
+			continue
+		}
 		title := pkg.ConvertRichText(res.Properties["Name"].(*notionapi.TitleProperty).Title)
 		// platformOptions := res.Properties["Platform"].(*notionapi.MultiSelectProperty).MultiSelect
 		// var platforms []string
@@ -96,8 +133,8 @@ func ParseAndGenerate(config pkg.BlogConfig) error {
 		// 	platforms = append(platforms, option.Name)
 		// }
 
-		fmt.Printf("-- Article [%d/%d] --\n", i+1, len(q.Results))
-		spin = spinner.StartNew("Getting blocks tree")
+		fmt.Printf("-- Article [%d/%d] --\n", i+1, len(allResults))
+		spin := spinner.StartNew("Getting blocks tree")
 		// Get page blocks tree
 		blocks, err := recursiveGetChildren(client, notionapi.BlockID(res.ID))
 		spin.Stop()
@@ -107,17 +144,10 @@ func ParseAndGenerate(config pkg.BlogConfig) error {
 		}
 		fmt.Println("✔ Getting blocks tree: Completed")
 
-		markdownContent, err := pkg.Generate(res, blocks, config)
+		wpRawContent, err := pkg.Generate(res, blocks, config)
 		if err != nil {
 			fmt.Println("Generating Failed")
 		}
-		extensions := parser.CommonExtensions | parser.AutoHeadingIDs
-		p := parser.NewWithExtensions(extensions)
-
-		htmlFlags := html.CommonFlags | html.HrefTargetBlank
-		opts := html.RendererOptions{Flags: htmlFlags}
-		renderer := html.NewRenderer(opts)
-		resource := markdown.ToHTML(markdownContent, p, renderer)
 
 		var tags []string
 
@@ -125,38 +155,20 @@ func ParseAndGenerate(config pkg.BlogConfig) error {
 			tags = append(tags, tag.Name)
 		}
 
-		// Upload to WordPress
 		var imageURL string
 		if res.Cover != nil {
 			imageURL = res.Cover.GetURL()
 		}
 		fmt.Println("Start uploading: ", title)
-		wordpressClient.UpdateOrCreatePost(title, resource, res.CreatedTime,
+		wordpressClient.UpdateOrCreatePost(res, title, string(wpRawContent),
 			[]string{res.Properties["Category"].(*notionapi.SelectProperty).Select.Name},
 			tags,
 			imageURL,
 			res.Properties["Status"].(*notionapi.StatusProperty).Status.Name,
 			int(res.Properties["WordPress ID"].(*notionapi.NumberProperty).Number),
-			res.LastEditedTime,
 		)
 		fmt.Println("✔ Process completed: ", title)
 	}
 
 	return nil
-}
-func updateNotionPageWordPressID(client *notionapi.Client, p notionapi.Page, wordPressID int, wordpressLink string) bool {
-	updatedProps := make(notionapi.Properties)
-	updatedProps["WordPress ID"] = notionapi.NumberProperty{
-		Number: float64(wordPressID),
-	}
-	updatedProps["WordPress Link"] = notionapi.URLProperty{
-		URL: wordpressLink,
-	}
-
-	_, err := client.Page.Update(context.Background(), notionapi.PageID(p.ID),
-		&notionapi.PageUpdateRequest{
-			Properties: updatedProps,
-		},
-	)
-	return err == nil
 }
